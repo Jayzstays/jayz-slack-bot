@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
@@ -355,17 +356,20 @@ def ops_today(ack, body, respond, logger):
         checkouts = guesty_data.get("checkouts")
 
         prompt_text = (
-            "You are an assistant for the Jayz Stays operations team. "
-            "I will give you raw JSON data from Guesty for today's reservations. "
-            "The JSON has two keys: 'checkins' and 'checkouts'.\n\n"
-            "Please produce a clear, concise summary with:\n"
-            "- Number of check-ins today\n"
-            "- Number of check-outs today\n"
-            "- Any notable patterns (by property, channel, or length of stay)\n"
-            "- A short bullet list of anything operationally important.\n\n"
-            f"CHECK-INS JSON:\n{checkins}\n\n"
-            f"CHECK-OUTS JSON:\n{checkouts}\n"
-        )
+    "You are an assistant for the Jayz Stays operations team. "
+    "Write the summary in PLAIN TEXT ONLY. "
+    "Do NOT use Markdown or formatting. No asterisks, no hash symbols, "
+    "no bold, no headings, no lists using hyphens and spaces like '- '. "
+    "Instead, write each line as a simple sentence or bullet using only hyphens with NO space after them.\n\n"
+    "Provide:\n"
+    "-Number of check-ins today\n"
+    "-Number of check-outs today\n"
+    "-Patterns by property or channel\n"
+    "-Operational notes written in plain text with no formatting.\n\n"
+    f"CHECK-INS JSON:\n{checkins}\n\n"
+    f"CHECK-OUTS JSON:\n{checkouts}\n"
+)
+
 
         summary = summarize_text_for_mode("qa", prompt_text)
 
@@ -441,38 +445,47 @@ async def cron_daily_summary():
 async def cron_ops_today():
     """
     Called by a cron job once per day (8am CST).
-    Posts today's Guesty check-ins + check-outs into Slack.
+    Posts today's Guesty check-ins + check-outs into Slack,
+    fully cleaned of Markdown (*, #).
     """
     channel_id = os.environ.get("OPS_TODAY_CHANNEL_ID")
     if not channel_id:
         return {"ok": False, "error": "OPS_TODAY_CHANNEL_ID not set"}
 
     try:
+        # Get today's Guesty data
         guesty_data = guesty_get_todays_reservations()
         checkins = guesty_data.get("checkins")
         checkouts = guesty_data.get("checkouts")
 
+        # Build prompt for OpenAI
         prompt_text = (
             "You are an assistant for the Jayz Stays operations team. "
-            "I will give you raw JSON data from Guesty for today's reservations. "
-            "The JSON has two keys: 'checkins' and 'checkouts'.\n\n"
-            "Please produce a clear, concise summary with:\n"
+            "Provide a clear, concise summary in PLAIN TEXT ONLY. "
+            "Do NOT use Markdown. Do NOT use *, #, bold, or headers.\n\n"
+            "Include:\n"
             "- Number of check-ins today\n"
             "- Number of check-outs today\n"
-            "- Any notable patterns (by property, channel, or length of stay)\n"
-            "- A short bullet list of anything operationally important.\n\n"
+            "- Patterns by property or channel\n"
+            "- Bullet-style operational notes, but WITHOUT markdown symbols.\n\n"
             f"CHECK-INS JSON:\n{checkins}\n\n"
             f"CHECK-OUTS JSON:\n{checkouts}\n"
         )
 
         summary = summarize_text_for_mode("qa", prompt_text)
 
-        # Escape Slack formatting
-        summary_clean = summary.replace("*", "\\*").replace("#", "\\#")
+        # Clean markdown characters the model might still produce
+        # 1) Remove markdown header symbols like ### or #
+        summary_clean = re.sub(r"^#+\s*", "", summary, flags=re.MULTILINE)
+        # 2) Remove ALL asterisks from bold/italic
+        summary_clean = summary_clean.replace("*", "")
+        # 3) Remove accidental hashes anywhere else
+        summary_clean = summary_clean.replace("#", "")
 
+        # Post to Slack
         slack_client.chat_postMessage(
             channel=channel_id,
-            text=f"8am CST - Today's operations overview:\n\n{summary_clean}"
+            text=f"8am CST - Today's Operations Overview:\n\n{summary_clean}"
         )
 
         return {"ok": True}
