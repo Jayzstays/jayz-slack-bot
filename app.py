@@ -108,21 +108,19 @@ def get_today_messages(slack_api_client, channel_id: str):
 
 def guesty_get_access_token():
     """
-    Get an OAuth access token from Guesty using client ID + secret.
-    Adjust the URL if your Guesty docs specify a different token endpoint.
+    Get an OAuth access token from Guesty using client ID + secret
+    via the Open API.
     """
     if not GUESTY_CLIENT_ID or not GUESTY_CLIENT_SECRET:
         raise RuntimeError("Guesty client ID/secret not configured")
 
-    # This URL may need to be updated to match your exact Guesty Open API docs.
     token_url = "https://open-api.guesty.com/oauth2/token"
 
     resp = requests.post(
         token_url,
         json={
-            "client_id": GUESTY_CLIENT_ID,
-            "client_secret": GUESTY_CLIENT_SECRET,
-            "grant_type": "client_credentials",
+            "clientId": GUESTY_CLIENT_ID,
+            "clientSecret": GUESTY_CLIENT_SECRET,
         },
         timeout=30,
     )
@@ -136,27 +134,23 @@ def guesty_get_access_token():
 
 def guesty_get_todays_reservations():
     """
-    Fetch today's reservations from Guesty using the Open API + OAuth token.
-    You may need to adjust the URL and query params based on your Guesty docs.
+    For now: fetch a batch of recent reservations from Guesty via Open API.
+    Once this works, we can add filters for today's check-ins/check-outs.
     """
     access_token = guesty_get_access_token()
 
-    now = datetime.now(TZ).date()
-    date_str = now.isoformat()  # e.g. "2025-11-16"
-
-    # Example URL – update path/params for your specific Guesty Open API version.
     reservations_url = "https://open-api.guesty.com/v1/reservations"
 
     headers = {
         "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
     }
 
     params = {
-        # These fields will need to match Guesty's query format.
-        # Often you'll filter by check-in/check-out date, status, etc.
-        "from": date_str,
-        "to": date_str,
+        # Basic "all reservations" query; Guesty expects filters as a JSON-encoded string
+        "filters": "[]",
+        "skip": 0,
+        "limit": 25,
+        "sort": "_id",
     }
 
     resp = requests.get(
@@ -166,8 +160,8 @@ def guesty_get_todays_reservations():
         timeout=30,
     )
     resp.raise_for_status()
-    data = resp.json()
-    return data
+    return resp.json()
+
 
 
 @bolt_app.event("app_mention")
@@ -276,7 +270,7 @@ def daily_summary_now(ack, body, respond, client, logger):
 @bolt_app.command("/ops_today")
 def ops_today(ack, body, respond, logger):
     """
-    Show today's operational picture from Guesty (reservations today).
+    Show today's operational picture from Guesty (currently 'recent reservations').
     """
     ack()
 
@@ -287,23 +281,24 @@ def ops_today(ack, body, respond, logger):
 
         prompt_text = (
             "You are an assistant for the Jayz Stays operations team. "
-            "I will give you raw reservation data from Guesty for TODAY. "
+            "I will give you raw reservation data from Guesty. "
             "Summarize it clearly. Include:\n"
-            "- Number of check-ins, check-outs, and stay-throughs\n"
-            "- Any notable patterns (e.g., many late arrivals, long stays)\n"
-            "- Any properties with particularly high activity\n\n"
+            "- Number of reservations\n"
+            "- Any notable patterns (length of stay, properties, channels)\n"
+            "- Anything that looks operationally important.\n\n"
             f"Raw data:\n{guesty_data}"
         )
 
         summary = summarize_text_for_mode("qa", prompt_text)
 
         respond(
-            f"📋 *Today's operations overview from Guesty* "
+            f"📋 *Guesty reservations overview* "
             f"(requested by <@{user_id}>):\n\n{summary}"
         )
     except Exception as e:
         logger.error(f"/ops_today error: {e}")
         respond("Sorry, I couldn’t fetch today’s data from Guesty. Check the logs for details.")
+
 
 
 # FastAPI wrapper for Slack events
