@@ -441,12 +441,10 @@ async def cron_daily_summary():
 async def cron_ops_today():
     """
     Called by a cron job once per day (8am CST).
-    Fetches today's check-ins and check-outs from Guesty
-    and posts a summary into a specific Slack channel.
+    Posts today's Guesty check-ins + check-outs into Slack.
     """
     channel_id = os.environ.get("OPS_TODAY_CHANNEL_ID")
     if not channel_id:
-        # No channel configured, nothing to do.
         return {"ok": False, "error": "OPS_TODAY_CHANNEL_ID not set"}
 
     try:
@@ -469,16 +467,17 @@ async def cron_ops_today():
 
         summary = summarize_text_for_mode("qa", prompt_text)
 
-        clean_summary = slack_escape(summary)
+        # Escape Slack formatting
+        summary_clean = summary.replace("*", "\\*").replace("#", "\\#")
 
-    slack_client.chat_postMessage(
-    channel=channel_id,
-    text=f"8am CST - Today's Guesty operations overview:\n\n{clean_summary}"
-)
-
+        slack_client.chat_postMessage(
+            channel=channel_id,
+            text=f"8am CST - Today's operations overview:\n\n{summary_clean}"
+        )
 
         return {"ok": True}
+
     except Exception as e:
-        # Simple logging for now
         print(f"cron_ops_today error: {e}")
         return {"ok": False, "error": str(e)}
+
