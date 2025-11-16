@@ -1,9 +1,11 @@
 import os
+import json
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
 import requests
 from dotenv import load_dotenv
+
 from fastapi import FastAPI, Request
 from slack_bolt import App
 from slack_bolt.adapter.fastapi import SlackRequestHandler
@@ -140,33 +142,98 @@ def guesty_get_access_token():
 
 def guesty_get_todays_reservations():
     """
-    For now: fetch a batch of recent reservations from Guesty via Open API.
-    Once this works, we can add filters for today's check-ins/check-outs.
+    Fetch today's check-ins and check-outs from Guesty using Open API.
+
+    - Check-ins:  checkInDateLocalized == today AND status in ["confirmed", "reserved"]
+    - Check-outs: checkOutDateLocalized == today AND status in ["confirmed", "reserved"]
     """
     access_token = guesty_get_access_token()
 
-    reservations_url = "https://open-api.guesty.com/v1/reservations"
+    today = datetime.now(TZ).date().isoformat()  # "YYYY-MM-DD", Guesty's expected format
 
+    base_url = "https://open-api.guesty.com/v1/reservations"
     headers = {
         "Authorization": f"Bearer {access_token}",
     }
 
-    params = {
-        # Basic "all reservations" query; Guesty expects filters as a JSON-encoded string
-        "filters": "[]",
-        "skip": 0,
-        "limit": 25,
+    # We only ask for the fields we care about
+    fields = (
+        "status "
+        "checkInDateLocalized "
+        "checkOutDateLocalized "
+        "listing "
+        "guest "
+        "confirmationCode "
+        "numberOfGuests"
+    )
+
+    # ---- Today’s CHECK-INS ----
+    filters_checkins = json.dumps([
+        {
+            "field": "checkInDateLocalized",
+            "operator": "$eq",
+            "value": today,
+        },
+        {
+            "field": "status",
+            "operator": "$in",
+            "value": ["confirmed", "reserved"],
+        },
+    ])
+
+    params_checkins = {
+        "fields": fields,
+        "filters": filters_checkins,
         "sort": "_id",
+        "limit": 100,
+        "skip": 0,
     }
 
-    resp = requests.get(
-        reservations_url,
+    resp_in = requests.get(
+        base_url,
         headers=headers,
-        params=params,
+        params=params_checkins,
         timeout=30,
     )
-    resp.raise_for_status()
-    return resp.json()
+    resp_in.raise_for_status()
+    checkins = resp_in.json()
+
+    # ---- Today’s CHECK-OUTS ----
+    filters_checkouts = json.dumps([
+        {
+            "field": "checkOutDateLocalized",
+            "operator": "$eq",
+            "value": today,
+        },
+        {
+            "field": "status",
+            "operator": "$in",
+            "value": ["confirmed", "reserved"],
+        },
+    ])
+
+    params_checkouts = {
+        "fields": fields,
+        "filters": filters_checkouts,
+        "sort": "_id",
+        "limit": 100,
+        "skip": 0,
+    }
+
+    resp_out = requests.get(
+        base_url,
+        headers=headers,
+        params=params_checkouts,
+        timeout=30,
+    )
+    resp_out.raise_for_status()
+    checkouts = resp_out.json()
+
+    # Return both sets so the caller can summarize
+    return {
+        "checkins": checkins,
+        "checkouts": checkouts,
+    }
 
 
 
@@ -276,7 +343,7 @@ def daily_summary_now(ack, body, respond, client, logger):
 @bolt_app.command("/ops_today")
 def ops_today(ack, body, respond, logger):
     """
-    Show today's operational picture from Guesty (currently 'recent reservations').
+    Show today's Guesty check-ins and check-outs.
     """
     ack()
 
@@ -284,26 +351,32 @@ def ops_today(ack, body, respond, logger):
 
     try:
         guesty_data = guesty_get_todays_reservations()
+        checkins = guesty_data.get("checkins")
+        checkouts = guesty_data.get("checkouts")
 
         prompt_text = (
             "You are an assistant for the Jayz Stays operations team. "
-            "I will give you raw reservation data from Guesty. "
-            "Summarize it clearly. Include:\n"
-            "- Number of reservations\n"
-            "- Any notable patterns (length of stay, properties, channels)\n"
-            "- Anything that looks operationally important.\n\n"
-            f"Raw data:\n{guesty_data}"
+            "I will give you raw JSON data from Guesty for today's reservations. "
+            "The JSON has two keys: 'checkins' and 'checkouts'.\n\n"
+            "Please produce a clear, concise summary with:\n"
+            "- Number of check-ins today\n"
+            "- Number of check-outs today\n"
+            "- Any notable patterns (by property, channel, or length of stay)\n"
+            "- A short bullet list of anything operationally important.\n\n"
+            f"CHECK-INS JSON:\n{checkins}\n\n"
+            f"CHECK-OUTS JSON:\n{checkouts}\n"
         )
 
         summary = summarize_text_for_mode("qa", prompt_text)
 
         respond(
-            f"📋 *Guesty reservations overview* "
+            f"📋 *Today's Guesty operations overview* "
             f"(requested by <@{user_id}>):\n\n{summary}"
         )
     except Exception as e:
         logger.error(f"/ops_today error: {e}")
-        respond("Sorry, I couldn’t fetch today’s data from Guesty. Check the logs for details.")
+        respond(f"⚠️ Error talking to Guesty: `{e}`")
+
 
 
 
