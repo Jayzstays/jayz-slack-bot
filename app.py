@@ -2,6 +2,7 @@ import os
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
+import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from slack_bolt import App
@@ -15,6 +16,9 @@ load_dotenv()
 SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
 SLACK_SIGNING_SECRET = os.environ["SLACK_SIGNING_SECRET"]
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+GUESTY_CLIENT_ID = os.environ.get("GUESTY_CLIENT_ID")
+GUESTY_CLIENT_SECRET = os.environ.get("GUESTY_CLIENT_SECRET")
+
 
 # Timezone for "today"
 TZ = ZoneInfo("America/Los_Angeles")
@@ -101,6 +105,69 @@ def get_today_messages(slack_api_client, channel_id: str):
         limit=500,
     )
     return history.get("messages", [])
+
+def guesty_get_access_token():
+    """
+    Get an OAuth access token from Guesty using client ID + secret.
+    Adjust the URL if your Guesty docs specify a different token endpoint.
+    """
+    if not GUESTY_CLIENT_ID or not GUESTY_CLIENT_SECRET:
+        raise RuntimeError("Guesty client ID/secret not configured")
+
+    # This URL may need to be updated to match your exact Guesty Open API docs.
+    token_url = "https://open-api.guesty.com/oauth2/token"
+
+    resp = requests.post(
+        token_url,
+        json={
+            "client_id": GUESTY_CLIENT_ID,
+            "client_secret": GUESTY_CLIENT_SECRET,
+            "grant_type": "client_credentials",
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    access_token = data.get("access_token")
+    if not access_token:
+        raise RuntimeError(f"Guesty token response missing access_token: {data}")
+    return access_token
+
+
+def guesty_get_todays_reservations():
+    """
+    Fetch today's reservations from Guesty using the Open API + OAuth token.
+    You may need to adjust the URL and query params based on your Guesty docs.
+    """
+    access_token = guesty_get_access_token()
+
+    now = datetime.now(TZ).date()
+    date_str = now.isoformat()  # e.g. "2025-11-16"
+
+    # Example URL – update path/params for your specific Guesty Open API version.
+    reservations_url = "https://open-api.guesty.com/v1/reservations"
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
+
+    params = {
+        # These fields will need to match Guesty's query format.
+        # Often you'll filter by check-in/check-out date, status, etc.
+        "from": date_str,
+        "to": date_str,
+    }
+
+    resp = requests.get(
+        reservations_url,
+        headers=headers,
+        params=params,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return data
 
 
 @bolt_app.event("app_mention")
@@ -205,6 +272,38 @@ def daily_summary_now(ack, body, respond, client, logger):
     except Exception as e:
         logger.error(f"Error in /daily_summary_now: {e}")
         respond("Sorry, I couldn’t generate the daily summary due to an error.")
+
+@bolt_app.command("/ops_today")
+def ops_today(ack, body, respond, logger):
+    """
+    Show today's operational picture from Guesty (reservations today).
+    """
+    ack()
+
+    user_id = body.get("user_id")
+
+    try:
+        guesty_data = guesty_get_todays_reservations()
+
+        prompt_text = (
+            "You are an assistant for the Jayz Stays operations team. "
+            "I will give you raw reservation data from Guesty for TODAY. "
+            "Summarize it clearly. Include:\n"
+            "- Number of check-ins, check-outs, and stay-throughs\n"
+            "- Any notable patterns (e.g., many late arrivals, long stays)\n"
+            "- Any properties with particularly high activity\n\n"
+            f"Raw data:\n{guesty_data}"
+        )
+
+        summary = summarize_text_for_mode("qa", prompt_text)
+
+        respond(
+            f"📋 *Today's operations overview from Guesty* "
+            f"(requested by <@{user_id}>):\n\n{summary}"
+        )
+    except Exception as e:
+        logger.error(f"/ops_today error: {e}")
+        respond("Sorry, I couldn’t fetch today’s data from Guesty. Check the logs for details.")
 
 
 # FastAPI wrapper for Slack events
