@@ -436,3 +436,49 @@ async def cron_daily_summary():
         )
 
     return {"ok": True}
+
+@app.post("/cron/ops-today")
+async def cron_ops_today():
+    """
+    Called by a cron job once per day (8am CST).
+    Fetches today's check-ins and check-outs from Guesty
+    and posts a summary into a specific Slack channel.
+    """
+    channel_id = os.environ.get("OPS_TODAY_CHANNEL_ID")
+    if not channel_id:
+        # No channel configured, nothing to do.
+        return {"ok": False, "error": "OPS_TODAY_CHANNEL_ID not set"}
+
+    try:
+        guesty_data = guesty_get_todays_reservations()
+        checkins = guesty_data.get("checkins")
+        checkouts = guesty_data.get("checkouts")
+
+        prompt_text = (
+            "You are an assistant for the Jayz Stays operations team. "
+            "I will give you raw JSON data from Guesty for today's reservations. "
+            "The JSON has two keys: 'checkins' and 'checkouts'.\n\n"
+            "Please produce a clear, concise summary with:\n"
+            "- Number of check-ins today\n"
+            "- Number of check-outs today\n"
+            "- Any notable patterns (by property, channel, or length of stay)\n"
+            "- A short bullet list of anything operationally important.\n\n"
+            f"CHECK-INS JSON:\n{checkins}\n\n"
+            f"CHECK-OUTS JSON:\n{checkouts}\n"
+        )
+
+        summary = summarize_text_for_mode("qa", prompt_text)
+
+        slack_client.chat_postMessage(
+            channel=channel_id,
+            text=(
+                "📋 *8am CST – Today's Guesty operations overview*\n\n"
+                f"{summary}"
+            ),
+        )
+
+        return {"ok": True}
+    except Exception as e:
+        # Simple logging for now
+        print(f"cron_ops_today error: {e}")
+        return {"ok": False, "error": str(e)}
