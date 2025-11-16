@@ -109,27 +109,33 @@ def get_today_messages(slack_api_client, channel_id: str):
 def guesty_get_access_token():
     """
     Get an OAuth access token from Guesty using client ID + secret
-    via the Open API.
+    via the Open API (form-encoded, as per Guesty docs).
     """
     if not GUESTY_CLIENT_ID or not GUESTY_CLIENT_SECRET:
         raise RuntimeError("Guesty client ID/secret not configured")
 
     token_url = "https://open-api.guesty.com/oauth2/token"
 
-    resp = requests.post(
-        token_url,
-        json={
-            "clientId": GUESTY_CLIENT_ID,
-            "clientSecret": GUESTY_CLIENT_SECRET,
-        },
-        timeout=30,
-    )
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+
+    data = {
+        "grant_type": "client_credentials",
+        "scope": "open-api",
+        "client_id": GUESTY_CLIENT_ID,
+        "client_secret": GUESTY_CLIENT_SECRET,
+    }
+
+    resp = requests.post(token_url, headers=headers, data=data, timeout=30)
     resp.raise_for_status()
     data = resp.json()
     access_token = data.get("access_token")
     if not access_token:
         raise RuntimeError(f"Guesty token response missing access_token: {data}")
     return access_token
+
 
 
 def guesty_get_todays_reservations():
