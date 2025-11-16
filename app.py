@@ -469,13 +469,13 @@ async def cron_ops_today():
 
         summary = summarize_text_for_mode("qa", prompt_text)
 
-        slack_client.chat_postMessage(
-            channel=channel_id,
-            text=(
-                "📋 *8am CST – Today's Guesty operations overview*\n\n"
-                f"{summary}"
-            ),
-        )
+        clean_summary = slack_escape(summary)
+
+    slack_client.chat_postMessage(
+    channel=channel_id,
+    text=f"8am CST - Today's Guesty operations overview:\n\n{clean_summary}"
+)
+
 
         return {"ok": True}
     except Exception as e:
