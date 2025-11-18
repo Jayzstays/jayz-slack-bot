@@ -606,9 +606,17 @@ def debug_properties_and_channels():
 # -----------------------------------------------
 @app.get("/debug/suggest-property-channel-map")
 def debug_suggest_property_channel_map():
-    mapping = suggest_property_channel_mapping(min_score=0.6)
-    text = json.dumps(mapping, indent=2)
-    return PlainTextResponse(text)
+    try:
+        mapping = suggest_property_channel_mapping(min_score=0.6)
+        text = json.dumps(mapping, indent=2)
+        return PlainTextResponse(text)
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        # Return the error as plain text so we can see what went wrong
+        error_text = f"ERROR in suggest_property_channel_mapping:\n{e}\n\nTRACEBACK:\n{tb}"
+        return PlainTextResponse(error_text)
+
 
 
 # -------------------------------
