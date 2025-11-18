@@ -388,6 +388,11 @@ def ops_today(ack, body, respond, logger):
 app = FastAPI()
 handler = SlackRequestHandler(bolt_app)
 
+# Logging
+import logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 
 @app.post("/slack/events")
 async def slack_events(req: Request):
@@ -399,56 +404,94 @@ async def healthz():
     return {"ok": True}
 
 
-# Cron endpoint: summarize today for all channels the bot is in
-@app.post("/cron/daily-summary")
-async def cron_daily_summary():
-    # List public & private channels the bot can see
-    channels = []
-    cursor = None
-    while True:
-        resp = slack_client.conversations_list(
-            types="public_channel,private_channel",
-            limit=200,
-            cursor=cursor,
-        )
-        channels.extend(resp.get("channels", []))
-        cursor = resp.get("response_metadata", {}).get("next_cursor")
-        if not cursor:
-            break
+# -------------------------------
+# UTIL: Fetch today's messages in a channel
+# -------------------------------
+def get_today_messages(slack_client, channel_id):
+    """Fetch today’s Slack messages from a channel."""
+    today = datetime.now(TZ).date().isoformat()
 
-    # For each channel where the bot is a member, summarize today
-    for ch in channels:
-        if not ch.get("is_member"):
-            continue
-        channel_id = ch["id"]
-        channel_name = ch.get("name")
+    resp = slack_client.conversations_history(
+        channel=channel_id,
+        limit=1000,
+    )
 
-        messages = get_today_messages(slack_client, channel_id)
-        if not messages:
-            continue
+    messages = []
+    for m in resp.get("messages", []):
+        ts = float(m.get("ts", 0))
+        d = datetime.fromtimestamp(ts, TZ).date().isoformat()
+        if d == today:
+            messages.append(m)
 
-        convo_text = build_conversation_text(messages)
-        summary = summarize_text_for_mode("channel_today", convo_text)
+    return messages
 
-        slack_client.chat_postMessage(
-            channel=channel_id,
-            text=(
-                f"📋 Automated end-of-day summary for *today* in this channel"
-                + (f" (#{channel_name})" if channel_name else "")
-                + f":\n\n{summary}"
-            ),
-        )
 
-    return {"ok": True}
+def build_conversation_text(messages):
+    """Convert messages list into plain text."""
+    lines = []
+    for m in messages:
+        user = m.get("user", "unknown")
+        text = m.get("text", "")
+        lines.append(f"{user}: {text}")
+    return "\n".join(lines)
 
-@app.post("/cron/ops-today")
-async def cron_ops_today():
-    """
-    Called by a cron job once per day (8am CST).
-    Posts today's Guesty check-ins + check-outs into Slack,
-    fully cleaned of Markdown (*, #).
-    """
+
+# -------------------------------
+# CRON: Daily Slack Channel Summary
+# -------------------------------
+@app.api_route("/cron/daily-summary", methods=["POST", "GET"])
+async def cron_daily_summary(request: Request):
+    logger.info("cron_daily_summary triggered via %s", request.method)
+    try:
+        # List channels
+        channels = []
+        cursor = None
+        while True:
+            resp = slack_client.conversations_list(
+                types="public_channel,private_channel",
+                limit=200,
+                cursor=cursor,
+            )
+            channels.extend(resp.get("channels", []))
+            cursor = resp.get("response_metadata", {}).get("next_cursor")
+            if not cursor:
+                break
+
+        # Summarize each channel where bot is a member
+        for ch in channels:
+            if not ch.get("is_member"):
+                continue
+
+            channel_id = ch["id"]
+            channel_name = ch.get("name")
+            messages = get_today_messages(slack_client, channel_id)
+
+            if not messages:
+                continue
+
+            convo_text = build_conversation_text(messages)
+            summary = summarize_text_for_mode("channel_today", convo_text)
+
+            slack_client.chat_postMessage(
+                channel=channel_id,
+                text=f"📋 End-of-Day Summary for Today (#{channel_name}):\n\n{summary}"
+            )
+
+        return {"ok": True}
+
+    except Exception:
+        logger.exception("cron_daily_summary failed")
+        return {"ok": False, "error": "daily summary failed"}
+
+
+# -------------------------------
+# CRON: Daily Ops Today (8am CST)
+# -------------------------------
+@app.api_route("/cron/ops-today", methods=["POST", "GET"])
+async def cron_ops_today(request: Request):
+    logger.info("cron_ops_today triggered via %s", request.method)
     channel_id = os.environ.get("OPS_TODAY_CHANNEL_ID")
+
     if not channel_id:
         return {"ok": False, "error": "OPS_TODAY_CHANNEL_ID not set"}
 
@@ -458,39 +501,35 @@ async def cron_ops_today():
         checkins = guesty_data.get("checkins")
         checkouts = guesty_data.get("checkouts")
 
-        # Build prompt for OpenAI
         prompt_text = (
             "You are an assistant for the Jayz Stays operations team. "
             "Provide a clear, concise summary in PLAIN TEXT ONLY. "
-            "Do NOT use Markdown. Do NOT use *, #, bold, or headers.\n\n"
+            "Do NOT use *, #, markdown lists, or bold.\n\n"
             "Include:\n"
             "- Number of check-ins today\n"
             "- Number of check-outs today\n"
             "- Patterns by property or channel\n"
-            "- Bullet-style operational notes, but WITHOUT markdown symbols.\n\n"
+            "- Operational notes in plain text\n\n"
             f"CHECK-INS JSON:\n{checkins}\n\n"
             f"CHECK-OUTS JSON:\n{checkouts}\n"
         )
 
+        # Query OpenAI
         summary = summarize_text_for_mode("qa", prompt_text)
 
-        # Clean markdown characters the model might still produce
-        # 1) Remove markdown header symbols like ### or #
+        # Additional cleaning
         summary_clean = re.sub(r"^#+\s*", "", summary, flags=re.MULTILINE)
-        # 2) Remove ALL asterisks from bold/italic
         summary_clean = summary_clean.replace("*", "")
-        # 3) Remove accidental hashes anywhere else
         summary_clean = summary_clean.replace("#", "")
 
         # Post to Slack
         slack_client.chat_postMessage(
             channel=channel_id,
-            text=f"8am CST - Today's Operations Overview:\n\n{summary_clean}"
+            text=f"8am CST - Today's Operations Overview:\n\n{summary_clean}",
         )
 
         return {"ok": True}
 
-    except Exception as e:
-        print(f"cron_ops_today error: {e}")
-        return {"ok": False, "error": str(e)}
-
+    except Exception:
+        logger.exception("cron_ops_today failed")
+        return {"ok": False, "error": "ops today failed"}
