@@ -8,10 +8,12 @@ import requests
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, Request
+from fastapi.responses import PlainTextResponse
 from slack_bolt import App
 from slack_bolt.adapter.fastapi import SlackRequestHandler
 from slack_sdk import WebClient
 from openai import OpenAI
+import difflib
 
 # Load environment variables
 load_dotenv()
@@ -109,6 +111,7 @@ def get_today_messages(slack_api_client, channel_id: str):
     )
     return history.get("messages", [])
 
+
 def guesty_get_access_token():
     """
     Get an OAuth access token from Guesty using client ID + secret
@@ -138,7 +141,6 @@ def guesty_get_access_token():
     if not access_token:
         raise RuntimeError(f"Guesty token response missing access_token: {data}")
     return access_token
-
 
 
 def guesty_get_todays_reservations():
@@ -236,6 +238,154 @@ def guesty_get_todays_reservations():
         "checkouts": checkouts,
     }
 
+
+# -------------------------------------------------------------------
+# NEW: Guesty + Slack helpers for listing/channel discovery + mapping
+# -------------------------------------------------------------------
+def guesty_get_all_properties():
+    """
+    Fetch all (or first N) Guesty listings/properties using Open API.
+    """
+    access_token = guesty_get_access_token()
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    url = "https://open-api.guesty.com/v1/listings"
+    params = {"limit": 200}
+
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        # open-api usually returns a dict with "results"
+        return data.get("results", [])
+    except Exception as e:
+        print(f"Error fetching Guesty properties: {e}")
+        return []
+
+
+def slack_get_all_channels():
+    """
+    Fetch Slack channels (public + private) that the bot can see.
+    """
+    try:
+        result = slack_client.conversations_list(
+            types="public_channel,private_channel",
+            limit=200,
+        )
+        return result.get("channels", [])
+    except Exception as e:
+        print(f"Error fetching Slack channels: {e}")
+        return []
+
+
+def _normalize_name_for_match(s):
+    """
+    Normalize a name for fuzzy matching.
+    """
+    if not s:
+        return ""
+    s = s.lower().strip()
+
+    # Simple cleanup: replace some common separators
+    for ch in ["-", "_", ".", ","]:
+        s = s.replace(ch, " ")
+
+    replacements = {
+        "apt": "apartment",
+        "bdr": "bedroom",
+        "br": "bedroom",
+        "st ": "street ",
+    }
+    for k, v in replacements.items():
+        s = s.replace(k, v)
+
+    s = " ".join(s.split())
+    return s
+
+
+def suggest_property_channel_mapping(min_score: float = 0.6):
+    """
+    Returns a dict of {Guesty_property_id: Slack_channel_id} suggestions
+    based on fuzzy matching between Guesty property name/nickname and
+    Slack channel name.
+    """
+    props = guesty_get_all_properties()
+    channels = slack_get_all_channels()
+
+    norm_channels = []
+    for c in channels:
+        cid = c.get("id")
+        cname = c.get("name") or ""
+        norm_name = _normalize_name_for_match(cname)
+        if not cid or not norm_name:
+            continue
+        norm_channels.append({"id": cid, "name": cname, "norm": norm_name})
+
+    suggestions = {}
+
+    for p in props:
+        pid = p.get("_id")
+        if not pid:
+            continue
+
+        pname = p.get("nickname") or p.get("title") or f"property-{pid}"
+        norm_pname = _normalize_name_for_match(pname)
+        if not norm_pname:
+            continue
+
+        best_score = 0.0
+        best_channel_id = None
+
+        for c in norm_channels:
+            score = difflib.SequenceMatcher(None, norm_pname, c["norm"]).ratio()
+            if score > best_score:
+                best_score = score
+                best_channel_id = c["id"]
+
+        if best_channel_id and best_score >= min_score:
+            suggestions[str(pid)] = best_channel_id
+
+    return suggestions
+
+
+def get_property_channel_map():
+    """
+    Load a manual/confirmed mapping from PROPERTY_CHANNEL_MAP_JSON env var.
+    {Guesty_property_id: Slack_channel_id}
+    """
+    raw = os.environ.get("PROPERTY_CHANNEL_MAP_JSON")
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except Exception as e:
+        print(f"Error parsing PROPERTY_CHANNEL_MAP_JSON: {e}")
+        return {}
+
+
+def get_slack_channel_for_reservation(reservation):
+    """
+    Given a Guesty reservation, return the mapped Slack channel ID
+    (if configured via PROPERTY_CHANNEL_MAP_JSON).
+    """
+    mapping = get_property_channel_map()
+    if not mapping:
+        return None
+
+    # Guesty reservation listing/property id (adjust if your shape differs)
+    listing = reservation.get("listing") or {}
+    listing_id = (
+        listing.get("_id")
+        or reservation.get("listingId")
+        or reservation.get("listing_id")
+        or reservation.get("propertyId")
+        or reservation.get("property_id")
+    )
+
+    if not listing_id:
+        return None
+
+    return mapping.get(str(listing_id))
 
 
 @bolt_app.event("app_mention")
@@ -341,6 +491,7 @@ def daily_summary_now(ack, body, respond, client, logger):
         logger.error(f"Error in /daily_summary_now: {e}")
         respond("Sorry, I couldn’t generate the daily summary due to an error.")
 
+
 @bolt_app.command("/ops_today")
 def ops_today(ack, body, respond, logger):
     """
@@ -356,20 +507,19 @@ def ops_today(ack, body, respond, logger):
         checkouts = guesty_data.get("checkouts")
 
         prompt_text = (
-    "You are an assistant for the Jayz Stays operations team. "
-    "Write the summary in PLAIN TEXT ONLY. "
-    "Do NOT use Markdown or formatting. No asterisks, no hash symbols, "
-    "no bold, no headings, no lists using hyphens and spaces like '- '. "
-    "Instead, write each line as a simple sentence or bullet using only hyphens with NO space after them.\n\n"
-    "Provide:\n"
-    "-Number of check-ins today\n"
-    "-Number of check-outs today\n"
-    "-Patterns by property or channel\n"
-    "-Operational notes written in plain text with no formatting.\n\n"
-    f"CHECK-INS JSON:\n{checkins}\n\n"
-    f"CHECK-OUTS JSON:\n{checkouts}\n"
-)
-
+            "You are an assistant for the Jayz Stays operations team. "
+            "Write the summary in PLAIN TEXT ONLY. "
+            "Do NOT use Markdown or formatting. No asterisks, no hash symbols, "
+            "no bold, no headings, no lists using hyphens and spaces like '- '. "
+            "Instead, write each line as a simple sentence or bullet using only hyphens with NO space after them.\n\n"
+            "Provide:\n"
+            "-Number of check-ins today\n"
+            "-Number of check-outs today\n"
+            "-Patterns by property or channel\n"
+            "-Operational notes written in plain text with no formatting.\n\n"
+            f"CHECK-INS JSON:\n{checkins}\n\n"
+            f"CHECK-OUTS JSON:\n{checkouts}\n"
+        )
 
         summary = summarize_text_for_mode("qa", prompt_text)
 
@@ -380,8 +530,6 @@ def ops_today(ack, body, respond, logger):
     except Exception as e:
         logger.error(f"/ops_today error: {e}")
         respond(f"⚠️ Error talking to Guesty: `{e}`")
-
-
 
 
 # FastAPI wrapper for Slack events
@@ -402,6 +550,41 @@ async def slack_events(req: Request):
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
+
+
+# ---------------------------------------
+# NEW DEBUG: show properties and channels
+# ---------------------------------------
+@app.get("/debug/properties-and-channels")
+def debug_properties_and_channels():
+    props = guesty_get_all_properties()
+    channels = slack_get_all_channels()
+
+    output = []
+
+    output.append("GUESTY PROPERTIES:\n")
+    for p in props:
+        pid = p.get("_id")
+        name = p.get("title") or p.get("nickname") or "Unnamed Property"
+        output.append(f"- {pid}: {name}")
+
+    output.append("\nSLACK CHANNELS:\n")
+    for c in channels:
+        cid = c.get("id")
+        name = c.get("name")
+        output.append(f"- {cid}: {name}")
+
+    return PlainTextResponse("\n".join(output))
+
+
+# -----------------------------------------------
+# NEW DEBUG: suggest property -> channel mapping
+# -----------------------------------------------
+@app.get("/debug/suggest-property-channel-map")
+def debug_suggest_property_channel_map():
+    mapping = suggest_property_channel_mapping(min_score=0.6)
+    text = json.dumps(mapping, indent=2)
+    return PlainTextResponse(text)
 
 
 # -------------------------------
