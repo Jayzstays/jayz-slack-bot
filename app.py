@@ -280,16 +280,20 @@ def slack_get_all_channels():
 
 def _normalize_name_for_match(s):
     """
-    Normalize a name for fuzzy matching.
+    Normalize a name for matching:
+    - lowercase
+    - remove special chars
+    - expand a few common abbreviations
     """
     if not s:
         return ""
     s = s.lower().strip()
 
-    # Simple cleanup: replace some common separators
+    # Replace some separators with spaces
     for ch in ["-", "_", ".", ","]:
         s = s.replace(ch, " ")
 
+    # Common abbreviations / cleanup
     replacements = {
         "apt": "apartment",
         "bdr": "bedroom",
@@ -299,19 +303,24 @@ def _normalize_name_for_match(s):
     for k, v in replacements.items():
         s = s.replace(k, v)
 
+    # Collapse multiple spaces
     s = " ".join(s.split())
     return s
+
 
 
 def suggest_property_channel_mapping(min_score: float = 0.6):
     """
     Returns a dict of {Guesty_property_id: Slack_channel_id} suggestions
-    based on fuzzy matching between Guesty property name/nickname and
-    Slack channel name.
+    based on:
+      1) Guesty 'nickname' vs Slack 'name' (preferred),
+      2) 'contains' match on normalized names,
+      3) fuzzy ratio fallback.
     """
     props = guesty_get_all_properties()
     channels = slack_get_all_channels()
 
+    # Build normalized channel list
     norm_channels = []
     for c in channels:
         cid = c.get("id")
@@ -328,24 +337,39 @@ def suggest_property_channel_mapping(min_score: float = 0.6):
         if not pid:
             continue
 
-        pname = p.get("nickname") or p.get("title") or f"property-{pid}"
-        norm_pname = _normalize_name_for_match(pname)
-        if not norm_pname:
+        # IMPORTANT: prefer nickname; only fall back to title if no nickname
+        nickname = p.get("nickname")
+        title = p.get("title")
+        raw_name = nickname or title or f"property-{pid}"
+        norm_prop = _normalize_name_for_match(raw_name)
+        if not norm_prop:
             continue
 
-        best_score = 0.0
         best_channel_id = None
+        best_score = 0.0
 
+        # 1) Try "contains" match first: nickname similar to channel name
         for c in norm_channels:
-            score = difflib.SequenceMatcher(None, norm_pname, c["norm"]).ratio()
-            if score > best_score:
-                best_score = score
+            if norm_prop and (norm_prop == c["norm"] or
+                              norm_prop in c["norm"] or
+                              c["norm"] in norm_prop):
                 best_channel_id = c["id"]
+                best_score = 1.0  # treat as perfect
+                break
+
+        # 2) If no contains match, use fuzzy ratio
+        if not best_channel_id:
+            for c in norm_channels:
+                score = difflib.SequenceMatcher(None, norm_prop, c["norm"]).ratio()
+                if score > best_score:
+                    best_score = score
+                    best_channel_id = c["id"]
 
         if best_channel_id and best_score >= min_score:
             suggestions[str(pid)] = best_channel_id
 
     return suggestions
+
 
 
 def get_property_channel_map():
