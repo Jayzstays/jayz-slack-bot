@@ -575,6 +575,23 @@ async def slack_events(req: Request):
 async def healthz():
     return {"ok": True}
 
+@app.get("/debug/test-property-map")
+def debug_test_property_map():
+    # Fake a Guesty reservation that matches your known property
+    test_reservation = {
+        "listing": {"_id": "63c1b699841d8b00503ce4bf"}
+    }
+
+    try:
+        result = get_slack_channel_for_reservation(test_reservation)
+    except Exception as e:
+        return {"error": str(e)}
+
+    return {
+        "expected": "C05AGSB18GZ",
+        "got": result
+    }
+
 
 # ---------------------------------------
 # NEW DEBUG: show properties and channels
