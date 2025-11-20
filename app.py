@@ -1,7 +1,7 @@
 import os
 import json
 import re
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -237,6 +237,106 @@ def guesty_get_todays_reservations():
         "checkins": checkins,
         "checkouts": checkouts,
     }
+
+def _extract_revenue_from_reservation(reservation) -> float:
+    """
+    Try several common fields in a Guesty reservation to estimate total revenue.
+    Returns 0.0 if we can't find anything.
+    """
+    def _to_float(val):
+        try:
+            return float(val)
+        except Exception:
+            return 0.0
+
+    money = (
+        reservation.get("money")
+        or reservation.get("price")
+        or reservation.get("balance")
+        or {}
+    )
+
+    # Direct keys on money dict
+    for key in ("total", "grossTotal", "balanceDue", "nativeTotal"):
+        if isinstance(money, dict) and key in money:
+            return _to_float(money.get(key))
+
+    # Nested native dict
+    if isinstance(money, dict):
+        native = money.get("native")
+        if isinstance(native, dict):
+            for key in ("total", "grossTotal"):
+                if key in native:
+                    return _to_float(native.get(key))
+
+    return 0.0
+def guesty_get_yesterday_bookings_stats():
+    """
+    Fetch reservations that were created yesterday and compute:
+      - number of bookings
+      - approximate total revenue
+
+    If Guesty rejects the createdAt filter, this will fall back to zeros
+    and log the error.
+    """
+    access_token = guesty_get_access_token()
+    headers = {"Authorization": f"Bearer {access_token}"}
+    base_url = "https://open-api.guesty.com/v1/reservations"
+
+    today = datetime.now(TZ).date()
+    yesterday = today - timedelta(days=1)
+
+    start_iso = f"{yesterday.isoformat()}T00:00:00.000Z"
+    end_iso = f"{today.isoformat()}T00:00:00.000Z"
+
+    fields = "status createdAt listing money price balance confirmationCode"
+
+    filters = json.dumps([
+        {
+            "field": "createdAt",
+            "operator": "$gte",
+            "value": start_iso,
+        },
+        {
+            "field": "createdAt",
+            "operator": "$lt",
+            "value": end_iso,
+        },
+        {
+            "field": "status",
+            "operator": "$in",
+            "value": ["confirmed", "reserved"],
+        },
+    ])
+
+    params = {
+        "fields": fields,
+        "filters": filters,
+        "sort": "_id",
+        "limit": 200,
+        "skip": 0,
+    }
+
+    try:
+        resp = requests.get(
+            base_url,
+            headers=headers,
+            params=params,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        reservations = _extract_reservations_list(data)
+
+        count = len(reservations)
+        revenue_total = 0.0
+        for r in reservations:
+            revenue_total += _extract_revenue_from_reservation(r)
+
+        return {"count": count, "revenue": revenue_total}
+    except Exception as e:
+        print(f"Error fetching yesterday bookings from Guesty: {e}")
+        return {"count": 0, "revenue": 0.0}
 
 
 # -------------------------------------------------------------------
@@ -477,7 +577,9 @@ def build_property_ops_messages_by_channel(guesty_data):
     """
     Take today's Guesty check-ins/check-outs and return a dict:
       { slack_channel_id: [message_text, ...], ... }
-    Only includes properties that have a mapping in PROPERTY_CHANNEL_MAP_JSON.
+
+    Uses get_slack_channel_for_reservation() directly so we don't depend
+    on the exact shape of listing IDs here.
     """
     raw_checkins = guesty_data.get("checkins")
     raw_checkouts = guesty_data.get("checkouts")
@@ -485,54 +587,55 @@ def build_property_ops_messages_by_channel(guesty_data):
     checkins = _extract_reservations_list(raw_checkins)
     checkouts = _extract_reservations_list(raw_checkouts)
 
-    # Aggregate by property ID
-    props = {}
-
-    # Handle check-ins
-    for r in checkins:
-        listing = r.get("listing") or {}
-        pid = listing.get("_id") or listing.get("id") or None
-        if not pid:
-            continue
-
-        prop_name = listing.get("nickname") or listing.get("title") or f"Property {pid}"
-        entry = props.setdefault(pid, {"name": prop_name, "checkins": [], "checkouts": [], "channel": None})
-        entry["checkins"].append(r)
-        # Use our mapping helper to get the Slack channel
-        if entry["channel"] is None:
-            entry["channel"] = get_slack_channel_for_reservation(r)
-
-    # Handle check-outs
-    for r in checkouts:
-        listing = r.get("listing") or {}
-        pid = listing.get("_id") or listing.get("id") or None
-        if not pid:
-            continue
-
-        prop_name = listing.get("nickname") or listing.get("title") or f"Property {pid}"
-        entry = props.setdefault(pid, {"name": prop_name, "checkins": [], "checkouts": [], "channel": None})
-        entry["checkouts"].append(r)
-        if entry["channel"] is None:
-            entry["channel"] = get_slack_channel_for_reservation(r)
-
-    # Now build messages grouped by Slack channel
+    # messages_by_channel[channel_id] = {
+    #   "property_name": str,
+    #   "checkins": [...],
+    #   "checkouts": [...],
+    # }
     messages_by_channel = {}
 
-    for pid, info in props.items():
-        channel_id = info.get("channel")
+    def add_reservation(reservation, kind: str):
+        channel_id = get_slack_channel_for_reservation(reservation)
         if not channel_id:
-            # No mapping for this property, skip for now
-            continue
+            return
 
+        listing = reservation.get("listing") or {}
+        prop_name = (
+            listing.get("nickname")
+            or listing.get("title")
+            or "Property"
+        )
+
+        entry = messages_by_channel.setdefault(
+            channel_id,
+            {"property_name": prop_name, "checkins": [], "checkouts": []},
+        )
+
+        if kind == "checkin":
+            entry["checkins"].append(reservation)
+        else:
+            entry["checkouts"].append(reservation)
+
+    # Add all check-ins
+    for r in checkins:
+        add_reservation(r, "checkin")
+
+    # Add all check-outs
+    for r in checkouts:
+        add_reservation(r, "checkout")
+
+    # Build final text per channel
+    channel_texts = {}
+    for channel_id, info in messages_by_channel.items():
         text = build_property_daily_ops_text(
-            property_name=info["name"],
+            property_name=info["property_name"],
             checkins=info["checkins"],
             checkouts=info["checkouts"],
         )
+        channel_texts.setdefault(channel_id, []).append(text)
 
-        messages_by_channel.setdefault(channel_id, []).append(text)
+    return channel_texts
 
-    return messages_by_channel
 
 
 @bolt_app.event("app_mention")
@@ -856,7 +959,12 @@ async def cron_ops_today(request: Request):
         checkins = guesty_data.get("checkins")
         checkouts = guesty_data.get("checkouts")
 
-        # 1) Global overview (same as before, sent to main ops channel)
+        # New: yesterday bookings stats
+        yesterday_stats = guesty_get_yesterday_bookings_stats()
+        y_count = yesterday_stats.get("count", 0)
+        y_revenue = yesterday_stats.get("revenue", 0.0)
+
+        # 1) Global overview to main ops channel
         prompt_text = (
             "You are an assistant for the Jayz Stays operations team. "
             "Provide a clear, concise summary in PLAIN TEXT ONLY. "
@@ -877,17 +985,25 @@ async def cron_ops_today(request: Request):
         summary_clean = summary_clean.replace("*", "")
         summary_clean = summary_clean.replace("#", "")
 
-        # Post global summary to main ops channel
+        # Add yesterday line at the top
+        yesterday_line = (
+            f"Yesterday bookings: {y_count} reservations, "
+            f"approx revenue: ${y_revenue:,.2f}"
+        )
+
         slack_client.chat_postMessage(
             channel=channel_id,
-            text=f"8am CST - Today's Operations Overview:\n\n{summary_clean}",
+            text=(
+                "8am CST - Today's Operations Overview:\n\n"
+                f"{yesterday_line}\n\n"
+                f"{summary_clean}"
+            ),
         )
 
         # 2) Property-specific messages to each mapped property channel
         messages_by_channel = build_property_ops_messages_by_channel(guesty_data)
 
         for prop_channel_id, messages in messages_by_channel.items():
-            # Combine messages for that property (or multiple properties mapped to same channel)
             text = "\n\n".join(messages)
             slack_client.chat_postMessage(
                 channel=prop_channel_id,
