@@ -817,6 +817,54 @@ def debug_test_property_map():
         "expected": "C05AGSB18GZ",
         "got": result
     }
+@app.get("/debug/533-today")
+def debug_533_today():
+    """
+    Debug endpoint to see if 533 South 51st St has any
+    check-ins or check-outs today and what Slack channel
+    we would post to.
+    """
+    try:
+        guesty_data = guesty_get_todays_reservations()
+    except Exception as e:
+        return {"error": f"Error calling guesty_get_todays_reservations: {e}"}
+
+    raw_checkins = guesty_data.get("checkins")
+    raw_checkouts = guesty_data.get("checkouts")
+
+    checkins = _extract_reservations_list(raw_checkins)
+    checkouts = _extract_reservations_list(raw_checkouts)
+
+    target_id = "63c1b699841d8b00503ce4bf"
+
+    cin_533 = []
+    cout_533 = []
+
+    for r in checkins:
+        listing = r.get("listing") or {}
+        if listing.get("_id") == target_id:
+            cin_533.append(r)
+
+    for r in checkouts:
+        listing = r.get("listing") or {}
+        if listing.get("_id") == target_id:
+            cout_533.append(r)
+
+    # Also test what channel we'd route to if there IS at least one reservation
+    channel_for_first = None
+    if cin_533:
+        channel_for_first = get_slack_channel_for_reservation(cin_533[0])
+    elif cout_533:
+        channel_for_first = get_slack_channel_for_reservation(cout_533[0])
+
+    return {
+        "property_id": target_id,
+        "checkins_count": len(cin_533),
+        "checkouts_count": len(cout_533),
+        "channel_for_first_reservation": channel_for_first,
+        "checkins_sample": cin_533[:2],
+        "checkouts_sample": cout_533[:2],
+    }
 
 
 # ---------------------------------------
