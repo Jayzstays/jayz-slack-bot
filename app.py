@@ -411,6 +411,129 @@ def get_slack_channel_for_reservation(reservation):
 
     return mapping.get(str(listing_id))
 
+def _extract_reservations_list(raw):
+    """
+    Guesty Open API may return either:
+      - {"results": [...], ...}
+      - or a plain list [...]
+    This normalizes it into a list.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        return raw.get("results", [])
+    return []
+
+
+def build_property_daily_ops_text(property_name, checkins, checkouts):
+    """
+    Build a plain-text daily ops summary for a single property.
+    No markdown, no emojis.
+    """
+    lines = []
+    lines.append(f"Property: {property_name}")
+    lines.append(f"Check-ins today: {len(checkins)}")
+
+    if checkins:
+        for r in checkins:
+            guest = ""
+            guest_obj = r.get("guest") or {}
+            guest = (
+                guest_obj.get("fullName")
+                or guest_obj.get("firstName")
+                or guest_obj.get("lastName")
+                or "Guest"
+            )
+            conf = r.get("confirmationCode") or "n/a"
+            num_guests = r.get("numberOfGuests") or 0
+            lines.append(f"- Check-in: {guest}, {num_guests} guests, confirmation {conf}")
+    else:
+        lines.append("No check-ins today.")
+
+    lines.append(f"Check-outs today: {len(checkouts)}")
+
+    if checkouts:
+        for r in checkouts:
+            guest = ""
+            guest_obj = r.get("guest") or {}
+            guest = (
+                guest_obj.get("fullName")
+                or guest_obj.get("firstName")
+                or guest_obj.get("lastName")
+                or "Guest"
+            )
+            conf = r.get("confirmationCode") or "n/a"
+            num_guests = r.get("numberOfGuests") or 0
+            lines.append(f"- Check-out: {guest}, {num_guests} guests, confirmation {conf}")
+    else:
+        lines.append("No check-outs today.")
+
+    return "\n".join(lines)
+
+
+def build_property_ops_messages_by_channel(guesty_data):
+    """
+    Take today's Guesty check-ins/check-outs and return a dict:
+      { slack_channel_id: [message_text, ...], ... }
+    Only includes properties that have a mapping in PROPERTY_CHANNEL_MAP_JSON.
+    """
+    raw_checkins = guesty_data.get("checkins")
+    raw_checkouts = guesty_data.get("checkouts")
+
+    checkins = _extract_reservations_list(raw_checkins)
+    checkouts = _extract_reservations_list(raw_checkouts)
+
+    # Aggregate by property ID
+    props = {}
+
+    # Handle check-ins
+    for r in checkins:
+        listing = r.get("listing") or {}
+        pid = listing.get("_id") or listing.get("id") or None
+        if not pid:
+            continue
+
+        prop_name = listing.get("nickname") or listing.get("title") or f"Property {pid}"
+        entry = props.setdefault(pid, {"name": prop_name, "checkins": [], "checkouts": [], "channel": None})
+        entry["checkins"].append(r)
+        # Use our mapping helper to get the Slack channel
+        if entry["channel"] is None:
+            entry["channel"] = get_slack_channel_for_reservation(r)
+
+    # Handle check-outs
+    for r in checkouts:
+        listing = r.get("listing") or {}
+        pid = listing.get("_id") or listing.get("id") or None
+        if not pid:
+            continue
+
+        prop_name = listing.get("nickname") or listing.get("title") or f"Property {pid}"
+        entry = props.setdefault(pid, {"name": prop_name, "checkins": [], "checkouts": [], "channel": None})
+        entry["checkouts"].append(r)
+        if entry["channel"] is None:
+            entry["channel"] = get_slack_channel_for_reservation(r)
+
+    # Now build messages grouped by Slack channel
+    messages_by_channel = {}
+
+    for pid, info in props.items():
+        channel_id = info.get("channel")
+        if not channel_id:
+            # No mapping for this property, skip for now
+            continue
+
+        text = build_property_daily_ops_text(
+            property_name=info["name"],
+            checkins=info["checkins"],
+            checkouts=info["checkouts"],
+        )
+
+        messages_by_channel.setdefault(channel_id, []).append(text)
+
+    return messages_by_channel
+
 
 @bolt_app.event("app_mention")
 def handle_app_mention(event, say, client, logger):
@@ -733,6 +856,7 @@ async def cron_ops_today(request: Request):
         checkins = guesty_data.get("checkins")
         checkouts = guesty_data.get("checkouts")
 
+        # 1) Global overview (same as before, sent to main ops channel)
         prompt_text = (
             "You are an assistant for the Jayz Stays operations team. "
             "Provide a clear, concise summary in PLAIN TEXT ONLY. "
@@ -746,7 +870,6 @@ async def cron_ops_today(request: Request):
             f"CHECK-OUTS JSON:\n{checkouts}\n"
         )
 
-        # Query OpenAI
         summary = summarize_text_for_mode("qa", prompt_text)
 
         # Additional cleaning
@@ -754,14 +877,26 @@ async def cron_ops_today(request: Request):
         summary_clean = summary_clean.replace("*", "")
         summary_clean = summary_clean.replace("#", "")
 
-        # Post to Slack
+        # Post global summary to main ops channel
         slack_client.chat_postMessage(
             channel=channel_id,
             text=f"8am CST - Today's Operations Overview:\n\n{summary_clean}",
         )
+
+        # 2) Property-specific messages to each mapped property channel
+        messages_by_channel = build_property_ops_messages_by_channel(guesty_data)
+
+        for prop_channel_id, messages in messages_by_channel.items():
+            # Combine messages for that property (or multiple properties mapped to same channel)
+            text = "\n\n".join(messages)
+            slack_client.chat_postMessage(
+                channel=prop_channel_id,
+                text=text,
+            )
 
         return {"ok": True}
 
     except Exception:
         logger.exception("cron_ops_today failed")
         return {"ok": False, "error": "ops today failed"}
+
