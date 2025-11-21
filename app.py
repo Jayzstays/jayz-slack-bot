@@ -1502,6 +1502,35 @@ def format_today_missing_app_section(todays_checkins_raw) -> str:
 
     return "\n".join(lines)
 
+@app.get("/debug/guesty-full-reservation")
+def debug_guesty_full_reservation():
+    """
+    Fetch ONE reservation from Guesty with ALL fields (no 'fields' filter)
+    so we can inspect the complete structure.
+    """
+    try:
+        access_token = guesty_get_access_token()
+    except Exception as e:
+        return {"error": f"Token error: {e}"}
+
+    url = "https://open-api.guesty.com/v1/reservations"
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    # Just get the most recent reservation
+    params = {
+        "limit": 1,
+        "sort": "-createdAt"   # newest first
+    }
+
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        return data
+    except Exception as e:
+        return {"error": str(e)}
+
 
 # -------------------------------
 # UTIL: Fetch today's messages in a channel
