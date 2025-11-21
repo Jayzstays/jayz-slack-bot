@@ -768,15 +768,17 @@ def handle_app_mention(event, say, client, logger):
     user = event.get("user")
     channel_id = event.get("channel")
     thread_ts = event.get("thread_ts") or event["ts"]
-        # --- Mode: draft an SOP from this conversation/thread ---
-    
-           if (
+
+    lower_text = text.lower()
+
+    # --- Mode: draft an SOP from this conversation/thread ---
+    if (
         "draft sop" in lower_text
         or "store this as an sop" in lower_text
         or "create sop" in lower_text
     ):
         try:
-            # 1. Fetch thread content
+            # Get the whole thread this mention is in
             replies = client.conversations_replies(
                 channel=channel_id,
                 ts=thread_ts,
@@ -785,7 +787,7 @@ def handle_app_mention(event, say, client, logger):
             messages = replies.get("messages", [])
             convo_text = build_conversation_text(messages)
 
-            # 2. Generate SOP body
+            # 1) Draft SOP body
             sop_prompt = (
                 "You are an assistant for the Jayz Stays team.\n"
                 "Draft a clear, structured Standard Operating Procedure (SOP) based solely on the conversation below.\n"
@@ -798,7 +800,7 @@ def handle_app_mention(event, say, client, logger):
 
             sop_draft = summarize_text_for_mode("qa", sop_prompt)
 
-            # 3. Generate SOP Title
+            # 2) Suggest SOP title
             title_prompt = (
                 "Based on the conversation below, generate a clear, professional SOP title.\n"
                 "Make it short, descriptive, and capitalized.\n"
@@ -825,46 +827,6 @@ def handle_app_mention(event, say, client, logger):
             )
         return
 
-        try:
-            # Get the whole thread this mention is in
-            replies = client.conversations_replies(
-                channel=channel_id,
-                ts=thread_ts,
-                limit=100,
-            )
-            messages = replies.get("messages", [])
-
-            convo_text = build_conversation_text(messages)
-
-            prompt = (
-                "You are an assistant for the Jayz Stays team.\n"
-                "Based on the Slack conversation below, draft a clear, step-by-step "
-                "Standard Operating Procedure (SOP).\n"
-                "Requirements:\n"
-                "- Use plain text only (no *, #, markdown).\n"
-                "- Use clear headings and numbered or bullet-style steps.\n"
-                "- Be specific and actionable.\n\n"
-                f"CONVERSATION:\n{convo_text}\n"
-            )
-
-            sop_draft = summarize_text_for_mode("qa", prompt)
-
-            say(
-                "Here is a proposed SOP based on this conversation:\n\n"
-                "SOP DRAFT START\n"
-                f"{sop_draft}\n"
-                "SOP DRAFT END\n\n"
-                "If this looks good, reply in this thread with:\n"
-                "save sop: Your SOP Title",
-                thread_ts=thread_ts,
-            )
-        except Exception as e:
-            logger.error(f"Error drafting SOP from thread: {e}")
-            say(
-                "Sorry, I could not draft an SOP from this conversation due to an error.",
-                thread_ts=thread_ts,
-            )
-        return
     # --- Mode: save the last SOP draft in this thread to Google Drive ---
     if lower_text.startswith("save sop:"):
         try:
@@ -919,9 +881,6 @@ def handle_app_mention(event, say, client, logger):
                 thread_ts=thread_ts,
             )
         return
-
-
-    lower_text = text.lower()
 
     # --- Mode 1: summarize this thread ---
     if "summarize this thread" in lower_text or "summarise this thread" in lower_text:
