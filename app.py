@@ -1380,6 +1380,32 @@ def debug_properties_and_channels():
 
     return PlainTextResponse("\n".join(output))
 
+@app.get("/debug/guesty-full-listing")
+def debug_guesty_full_listing():
+    """
+    Fetch ONE listing from Guesty with ALL fields so we can inspect
+    lock-related information (if any).
+    """
+    try:
+        access_token = guesty_get_access_token()
+    except Exception as e:
+        return {"error": f"Token error: {e}"}
+
+    url = "https://open-api.guesty.com/v1/listings"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    params = {
+        "limit": 1,
+        "sort": "-createdAt"
+    }
+
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        return data
+    except Exception as e:
+        return {"error": str(e)}
+
 
 # -----------------------------------------------
 # NEW DEBUG: suggest property -> channel mapping
