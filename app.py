@@ -1012,6 +1012,79 @@ def debug_533_today():
         "checkouts_sample": cout_533[:2],
     }
 
+@bolt_app.command("/sop_help")
+def sop_help(ack, body, respond, logger):
+    """
+    Help employees by searching SOPs in Google Drive and answering
+    their question using the best-matching SOP.
+    """
+    ack()
+
+    user_id = body.get("user_id")
+    query = (body.get("text") or "").strip()
+
+    if not query:
+        respond(
+            "Please provide a question or topic.\n"
+            "Example: /sop_help late checkout procedure"
+        )
+        return
+
+    try:
+        files = search_sops_in_drive(query, max_results=3)
+    except Exception as e:
+        logger.error(f"/sop_help Drive search error: {e}")
+        respond("Sorry, I could not search SOPs in Google Drive.")
+        return
+
+    if not files:
+        respond(f"I could not find any SOPs matching: {query}")
+        return
+
+    # Take the best match (first file)
+    target = files[0]
+    file_id = target["id"]
+    file_name = target.get("name", "SOP")
+    link = target.get("webViewLink", "")
+
+    try:
+        sop_text = get_sop_content(file_id)
+    except Exception as e:
+        logger.error(f"/sop_help error getting content: {e}")
+        respond(
+            f"I found an SOP named '{file_name}', "
+            f"but could not read its content. Link: {link}"
+        )
+        return
+
+    # Ask OpenAI to answer using the SOP text
+    prompt = (
+        "You are an assistant for the Jayz Stays team. "
+        "Answer the employee's question using ONLY the SOP text below. "
+        "If the SOP does not cover the question, say you are not sure.\n\n"
+        f"Employee question:\n{query}\n\n"
+        "SOP TEXT:\n"
+        f"{sop_text}\n"
+    )
+
+    try:
+        answer = summarize_text_for_mode("qa", prompt)
+    except Exception as e:
+        logger.error(f"/sop_help OpenAI error: {e}")
+        respond(
+            f"I found an SOP named '{file_name}', but had trouble generating guidance. "
+            f"You can read it here: {link}"
+        )
+        return
+
+    full_reply = (
+        f"Based on SOP '{file_name}', here is the guidance:\n\n"
+        f"{answer}\n\n"
+        f"Full SOP: {link}"
+    )
+
+    respond(full_reply[:3000])  # keep under Slack limits
+
 
 # ---------------------------------------
 # NEW DEBUG: show properties and channels
