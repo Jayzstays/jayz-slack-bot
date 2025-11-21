@@ -3,6 +3,10 @@ import json
 import re
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaInMemoryUpload
+
 
 import requests
 from dotenv import load_dotenv
@@ -141,6 +145,101 @@ def guesty_get_access_token():
     if not access_token:
         raise RuntimeError(f"Guesty token response missing access_token: {data}")
     return access_token
+
+def get_drive_service():
+    """
+    Build a Google Drive service using a service account JSON stored in
+    GOOGLE_SERVICE_ACCOUNT_JSON.
+    """
+    service_account_raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if not service_account_raw:
+        raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON not set")
+
+    info = json.loads(service_account_raw)
+
+    creds = service_account.Credentials.from_service_account_info(
+        info,
+        scopes=["https://www.googleapis.com/auth/drive"]
+    )
+
+    return build("drive", "v3", credentials=creds)
+
+
+def create_sop_file_in_drive(title: str, content: str) -> dict:
+    """
+    Create a Google Doc in the SOP_DRIVE_FOLDER_ID folder with the given content.
+    Returns a dict with id and webViewLink.
+    """
+    folder_id = os.environ.get("SOP_DRIVE_FOLDER_ID")
+    if not folder_id:
+        raise RuntimeError("SOP_DRIVE_FOLDER_ID not set")
+
+    drive = get_drive_service()
+
+    file_metadata = {
+        "name": title,
+        "mimeType": "application/vnd.google-apps.document",
+        "parents": [folder_id],
+    }
+
+    media = MediaInMemoryUpload(
+        content.encode("utf-8"),
+        mimetype="text/plain",
+        resumable=False,
+    )
+
+    file = drive.files().create(
+        body=file_metadata,
+        media_body=media,
+        fields="id, name, webViewLink",
+    ).execute()
+
+    return file
+
+
+def search_sops_in_drive(query: str, max_results: int = 5) -> list[dict]:
+    """
+    Search SOP Google Docs in the SOP folder by full text / title.
+    Returns a list of {id, name, webViewLink}.
+    """
+    folder_id = os.environ.get("SOP_DRIVE_FOLDER_ID")
+    if not folder_id:
+        raise RuntimeError("SOP_DRIVE_FOLDER_ID not set")
+
+    drive = get_drive_service()
+
+    # Basic escaping of single quotes
+    safe_query = query.replace("'", "\\'")
+    q = (
+        f"'{folder_id}' in parents and "
+        f"trashed = false and "
+        f"fullText contains '{safe_query}'"
+    )
+
+    resp = drive.files().list(
+        q=q,
+        pageSize=max_results,
+        fields="files(id, name, webViewLink)",
+    ).execute()
+
+    return resp.get("files", [])
+
+
+def get_sop_content(file_id: str) -> str:
+    """
+    Export a Google Doc SOP as plain text.
+    """
+    drive = get_drive_service()
+    # Google Docs must be exported to text
+    data = drive.files().export(
+        fileId=file_id,
+        mimeType="text/plain",
+    ).execute()
+
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="ignore")
+    # googleapiclient may already give str
+    return str(data)
 
 
 def guesty_get_todays_reservations():
@@ -780,6 +879,53 @@ def ops_today(ack, body, respond, logger):
     except Exception as e:
         logger.error(f"/ops_today error: {e}")
         respond(f"⚠️ Error talking to Guesty: `{e}`")
+
+@bolt_app.command("/save_sop")
+def save_sop(ack, body, respond, logger):
+    """
+    Save an SOP from Slack into Google Drive as a Google Doc.
+
+    Usage from Slack:
+      /save_sop Title of SOP | step 1, step 2, step 3...
+
+    If no '|' is provided, the whole text is used as both the title and content.
+    """
+    ack()
+
+    user_id = body.get("user_id")
+    raw_text = (body.get("text") or "").strip()
+
+    if not raw_text:
+        respond(
+            "Please provide SOP text.\n"
+            "Example: /save_sop Cleaning Checklist | Step 1, step 2, step 3..."
+        )
+        return
+
+    if "|" in raw_text:
+        title_part, content_part = raw_text.split("|", 1)
+        title = title_part.strip()
+        content = content_part.strip()
+    else:
+        title = raw_text[:80].strip()
+        content = raw_text
+
+    if not title:
+        title = "Untitled SOP"
+
+    try:
+        file = create_sop_file_in_drive(title, content)
+        name = file.get("name", title)
+        link = file.get("webViewLink", "(no link)")
+
+        respond(
+            f"SOP saved as '{name}'.\n"
+            f"Drive link: {link}\n"
+            f"Requested by <@{user_id}>."
+        )
+    except Exception as e:
+        logger.error(f"/save_sop error: {e}")
+        respond("Sorry, I could not save the SOP to Google Drive. Check the logs.")
 
 
 # FastAPI wrapper for Slack events
