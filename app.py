@@ -744,11 +744,62 @@ def handle_app_mention(event, say, client, logger):
     channel_id = event.get("channel")
     thread_ts = event.get("thread_ts") or event["ts"]
         # --- Mode: draft an SOP from this conversation/thread ---
-    if (
+    
+           if (
         "draft sop" in lower_text
         or "store this as an sop" in lower_text
         or "create sop" in lower_text
     ):
+        try:
+            # 1. Fetch thread content
+            replies = client.conversations_replies(
+                channel=channel_id,
+                ts=thread_ts,
+                limit=100,
+            )
+            messages = replies.get("messages", [])
+            convo_text = build_conversation_text(messages)
+
+            # 2. Generate SOP body
+            sop_prompt = (
+                "You are an assistant for the Jayz Stays team.\n"
+                "Draft a clear, structured Standard Operating Procedure (SOP) based solely on the conversation below.\n"
+                "Requirements:\n"
+                "- Plain text only (no markdown, no *, no #)\n"
+                "- Include: Purpose, Required Materials (if applicable), Step-by-step process\n"
+                "- Use concise, professional, operational language.\n\n"
+                f"CONVERSATION:\n{convo_text}\n"
+            )
+
+            sop_draft = summarize_text_for_mode("qa", sop_prompt)
+
+            # 3. Generate SOP Title
+            title_prompt = (
+                "Based on the conversation below, generate a clear, professional SOP title.\n"
+                "Make it short, descriptive, and capitalized.\n"
+                "Do NOT add quotes. Do NOT add extra text.\n\n"
+                f"CONVERSATION:\n{convo_text}\n"
+            )
+
+            suggested_title = summarize_text_for_mode("qa", title_prompt)
+            suggested_title = suggested_title.replace("\n", " ").strip()
+
+            say(
+                f"Here is a proposed SOP based on this conversation:\n\n"
+                f"Suggested Title: {suggested_title}\n\n"
+                f"SOP DRAFT START\n{sop_draft}\nSOP DRAFT END\n\n"
+                f"If this looks good, reply in this thread with:\n"
+                f"save sop: {suggested_title}",
+                thread_ts=thread_ts,
+            )
+        except Exception as e:
+            logger.error(f"Error drafting SOP with title suggestion: {e}")
+            say(
+                "Sorry, I could not draft an SOP from this conversation.",
+                thread_ts=thread_ts,
+            )
+        return
+
         try:
             # Get the whole thread this mention is in
             replies = client.conversations_replies(
