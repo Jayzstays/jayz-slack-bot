@@ -1,7 +1,7 @@
 import os
 import json
 import re
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -291,8 +291,14 @@ def guesty_get_todays_reservations():
         "listing "
         "guest "
         "confirmationCode "
-        "numberOfGuests"
+        "numberOfGuests "
+        "preCheckIn "
+        "customFields "
+        "money "
+        "price "
+        "balance "
     )
+
 
     # ---- Today’s CHECK-INS ----
     filters_checkins = json.dumps([
@@ -361,6 +367,134 @@ def guesty_get_todays_reservations():
         "checkins": checkins,
         "checkouts": checkouts,
     }
+
+# >>> INSERT START: yesterday reservations detail <<<
+
+def guesty_get_yesterday_reservations_detail():
+    """
+    Fetch reservations that were created yesterday (local TZ) and return a list
+    of detailed reservation objects for reporting.
+    """
+    access_token = guesty_get_access_token()
+    headers = {"Authorization": f"Bearer {access_token}"}
+    base_url = "https://open-api.guesty.com/v1/reservations"
+
+    now_local = datetime.now(TZ)
+    today_local = now_local.date()
+    yesterday_local = today_local - timedelta(days=1)
+
+    start_local = datetime.combine(yesterday_local, time.min, tzinfo=TZ)
+    end_local = datetime.combine(today_local, time.min, tzinfo=TZ)
+
+    # Convert to UTC ISO strings
+    start_utc = start_local.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    end_utc = end_local.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    fields = (
+        "status "
+        "createdAt "
+        "checkInDateLocalized "
+        "checkOutDateLocalized "
+        "listing "
+        "guest "
+        "money "
+        "price "
+        "balance "
+        "confirmationCode "
+        "numberOfGuests "
+        "preCheckIn "
+        "customFields "
+    )
+
+    filters = json.dumps([
+        {
+            "field": "createdAt",
+            "operator": "$gte",
+            "value": start_utc,
+        },
+        {
+            "field": "createdAt",
+            "operator": "$lt",
+            "value": end_utc,
+        },
+        {
+            "field": "status",
+            "operator": "$in",
+            "value": ["confirmed", "reserved"],
+        },
+    ])
+
+    params = {
+        "fields": fields,
+        "filters": filters,
+        "sort": "_id",
+        "limit": 200,
+        "skip": 0,
+    }
+
+    try:
+        resp = requests.get(
+            base_url,
+            headers=headers,
+            params=params,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return _extract_reservations_list(data)
+    except Exception as e:
+        print(f"Error fetching yesterday reservations from Guesty: {e}")
+        return []
+
+# <<< INSERT END
+
+def _extract_reservations_list(raw):
+    """
+    Guesty Open API may return either:
+      - {"results": [...], ...}
+      - or a plain list [...]
+    This normalizes it into a list.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        return raw.get("results", [])
+    return []
+
+def _extract_revenue_from_reservation(reservation) -> float:
+    """
+    Try several common fields in a Guesty reservation to estimate total revenue.
+    Returns 0.0 if we can't find anything.
+    """
+    def _to_float(val):
+        try:
+            return float(val)
+        except Exception:
+            return 0.0
+
+    money = (
+        reservation.get("money")
+        or reservation.get("price")
+        or reservation.get("balance")
+        or {}
+    )
+
+    # Direct keys on money dict
+    for key in ("total", "grossTotal", "balanceDue", "nativeTotal"):
+        if isinstance(money, dict) and key in money:
+            return _to_float(money.get(key))
+
+    # Nested native dict
+    if isinstance(money, dict):
+        native = money.get("native")
+        if isinstance(native, dict):
+            for key in ("total", "grossTotal"):
+                if key in native:
+                    return _to_float(native.get(key))
+
+    return 0.0
 
 def _extract_revenue_from_reservation(reservation) -> float:
     """
@@ -1263,6 +1397,110 @@ def debug_suggest_property_channel_map():
         error_text = f"ERROR in suggest_property_channel_mapping:\n{e}\n\nTRACEBACK:\n{tb}"
         return PlainTextResponse(error_text)
 
+def _is_guesty_app_signed(reservation) -> bool:
+    """
+    Determine whether the guest has completed/signed the Guesty app / pre-check-in.
+    This is a placeholder and should be adjusted once you know the exact field
+    from your Guesty reservation JSON.
+    """
+    pre_checkin = (
+        reservation.get("preCheckIn")
+        or reservation.get("preCheckin")
+        or reservation.get("pre_check_in")
+        or {}
+    )
+
+    if isinstance(pre_checkin, dict):
+        # Common patterns – adjust once you see real structure
+        status = (pre_checkin.get("status") or "").lower()
+        if status in ("completed", "signed", "done", "finished"):
+            return True
+        if pre_checkin.get("isCompleted") is True:
+            return True
+
+    # Fallback: assume not signed
+    return False
+
+def format_yesterday_reservations_section(reservations: list[dict]) -> str:
+    """
+    Build a plain-text section describing yesterday's new reservations:
+    - property nickname
+    - booking dates
+    - total revenue
+    """
+    if not reservations:
+        return "Yesterday's new reservations: None."
+
+    lines = []
+    lines.append("Yesterday's new reservations:")
+
+    total_revenue = 0.0
+
+    for r in reservations:
+        listing = r.get("listing") or {}
+        prop_name = listing.get("nickname") or listing.get("title") or "Unknown property"
+
+        checkin = r.get("checkInDateLocalized") or "?"
+        checkout = r.get("checkOutDateLocalized") or "?"
+
+        revenue = _extract_revenue_from_reservation(r)
+        total_revenue += revenue
+
+        guest = r.get("guest") or {}
+        guest_name = (
+            guest.get("fullName")
+            or guest.get("firstName")
+            or guest.get("lastName")
+            or "Guest"
+        )
+
+        lines.append(
+            f"- {prop_name} | {checkin} to {checkout} | {guest_name} | "
+            f"Revenue approx: ${revenue:,.2f}"
+        )
+
+    lines.append(f"Total revenue from yesterday's new reservations: ${total_revenue:,.2f}")
+    return "\n".join(lines)
+
+def format_today_missing_app_section(todays_checkins_raw) -> str:
+    """
+    Among today's check-ins, list which guests have NOT signed / completed
+    the Guesty app / pre-check-in.
+    """
+    checkins = _extract_reservations_list(todays_checkins_raw)
+    missing = []
+
+    for r in checkins:
+        if _is_guesty_app_signed(r):
+            continue
+
+        listing = r.get("listing") or {}
+        prop_name = listing.get("nickname") or listing.get("title") or "Unknown property"
+
+        checkin = r.get("checkInDateLocalized") or "?"
+        checkout = r.get("checkOutDateLocalized") or "?"
+
+        guest = r.get("guest") or {}
+        guest_name = (
+            guest.get("fullName")
+            or guest.get("firstName")
+            or guest.get("lastName")
+            or "Guest"
+        )
+
+        missing.append((prop_name, guest_name, checkin, checkout))
+
+    if not missing:
+        return "Guesty app / pre-check-in: All guests checking in today appear to be completed."
+
+    lines = []
+    lines.append("Guests checking in today who have NOT completed the Guesty app / pre-check-in:")
+    for prop_name, guest_name, checkin, checkout in missing:
+        lines.append(
+            f"- {prop_name} | {checkin} to {checkout} | {guest_name}"
+        )
+
+    return "\n".join(lines)
 
 
 # -------------------------------
@@ -1374,17 +1612,19 @@ async def cron_ops_today(request: Request):
         return {"ok": False, "error": "OPS_TODAY_CHANNEL_ID not set"}
 
     try:
-        # Get today's Guesty data
+        # 1) Today's Guesty data (check-ins / check-outs)
         guesty_data = guesty_get_todays_reservations()
         checkins = guesty_data.get("checkins")
         checkouts = guesty_data.get("checkouts")
 
-        # New: yesterday bookings stats
-        yesterday_stats = guesty_get_yesterday_bookings_stats()
-        y_count = yesterday_stats.get("count", 0)
-        y_revenue = yesterday_stats.get("revenue", 0.0)
+        # 2) Yesterday's new reservations (details + revenue)
+        yesterday_reservations = guesty_get_yesterday_reservations_detail()
+        yesterday_section = format_yesterday_reservations_section(yesterday_reservations)
 
-        # 1) Global overview to main ops channel
+        # 3) Today's check-ins missing Guesty app / pre-check-in
+        missing_app_section = format_today_missing_app_section(checkins)
+
+        # 4) Global overview via OpenAI (today's ops)
         prompt_text = (
             "You are an assistant for the Jayz Stays operations team. "
             "Provide a clear, concise summary in PLAIN TEXT ONLY. "
@@ -1405,30 +1645,22 @@ async def cron_ops_today(request: Request):
         summary_clean = summary_clean.replace("*", "")
         summary_clean = summary_clean.replace("#", "")
 
-        # Add yesterday line at the top
-        yesterday_line = (
-            f"Yesterday bookings: {y_count} reservations, "
-            f"approx revenue: ${y_revenue:,.2f}"
+        # 5) Compose final text
+        final_text = (
+            "8am CST - Today's Operations Overview:\n\n"
+            f"{yesterday_section}\n\n"
+            f"{missing_app_section}\n\n"
+            f"Today's check-ins and check-outs summary:\n"
+            f"{summary_clean}"
         )
 
+        # 6) Post to Slack main ops channel
         slack_client.chat_postMessage(
             channel=channel_id,
-            text=(
-                "8am CST - Today's Operations Overview:\n\n"
-                f"{yesterday_line}\n\n"
-                f"{summary_clean}"
-            ),
+            text=final_text,
         )
 
-        # 2) Property-specific messages to each mapped property channel
-        messages_by_channel = build_property_ops_messages_by_channel(guesty_data)
-
-        for prop_channel_id, messages in messages_by_channel.items():
-            text = "\n\n".join(messages)
-            slack_client.chat_postMessage(
-                channel=prop_channel_id,
-                text=text,
-            )
+        # (Optional) if you already had per-property posts, keep that block here
 
         return {"ok": True}
 
