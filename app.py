@@ -1406,6 +1406,33 @@ def debug_guesty_full_listing():
     except Exception as e:
         return {"error": str(e)}
 
+@app.get("/debug/guesty-full-reservation")
+async def debug_guesty_full_reservation():
+    """
+    Fetch ONE full reservation from Guesty with no 'fields' filter.
+    This shows the complete JSON structure so we can locate
+    check-in form / preCheckIn data if available.
+    """
+    try:
+        access_token = guesty_get_access_token()
+    except Exception as e:
+        return {"error": f"Token error: {e}"}
+
+    url = "https://open-api.guesty.com/v1/reservations"
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    params = {
+        "sort": "-createdAt",   # newest reservation
+        "limit": 1
+    }
+
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        return {"error": str(e)}
+
 
 # -----------------------------------------------
 # NEW DEBUG: suggest property -> channel mapping
