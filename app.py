@@ -84,6 +84,30 @@ def summarize_text_for_mode(mode: str, convo_text: str) -> str:
             "If there was little or no activity, say so."
         )
         user_content = f"Summarize *today's* activity in this Slack channel:\n\n{convo_text}"
+    elif mode == "sop_suggestions":
+        # NEW MODE: find implicit processes that should become SOPs
+        system_content = (
+            "You are a process design assistant for the Jayz Stays team. "
+            "Your job is to scan Slack conversations and suggest which recurring "
+            "processes or workflows should be turned into Standard Operating Procedures (SOPs). "
+            "Respond in PLAIN TEXT ONLY (no markdown, no *, no #).\n\n"
+            "When asked, you should:\n"
+            "- Look for repeated patterns, checklists, troubleshooting steps, or decisions.\n"
+            "- Suggest up to 3 SOP candidates.\n"
+            "- For each candidate, give a short title and one-line description.\n"
+            "- If there are no strong candidates, say: No strong SOP candidates from this channel today."
+        )
+        user_content = (
+            "Based only on the Slack messages below, identify up to 3 potential SOPs "
+            "the team might want to formalize. These should be recurring processes or "
+            "clear workflows (not one-off issues).\n\n"
+            "Format your answer as plain text, one SOP per line, like:\n"
+            "1) Title: short description\n"
+            "2) ...\n\n"
+            "If there are no strong SOP candidates, reply exactly:\n"
+            "No strong SOP candidates from this channel today.\n\n"
+            f"SLACK MESSAGES:\n{convo_text}"
+        )
     else:
         system_content = (
             "You are a helpful Slack assistant for the Jayz Stays team. "
@@ -100,6 +124,7 @@ def summarize_text_for_mode(mode: str, convo_text: str) -> str:
         temperature=0.2,
     )
     return resp.choices[0].message.content
+
 
 
 def get_today_messages(slack_api_client, channel_id: str):
@@ -1347,11 +1372,27 @@ async def cron_daily_summary(request: Request):
                 continue
 
             convo_text = build_conversation_text(messages)
+
+            # Regular end-of-day summary
             summary = summarize_text_for_mode("channel_today", convo_text)
+
+            # NEW: suggested SOPs
+            try:
+                sop_suggestions = summarize_text_for_mode("sop_suggestions", convo_text)
+            except Exception as e:
+                logger.error(f"Error generating SOP suggestions for channel {channel_id}: {e}")
+                sop_suggestions = "Could not generate SOP suggestions today."
+
+            text = (
+                f"📋 End-of-Day Summary for Today (#{channel_name}):\n\n"
+                f"{summary}\n\n"
+                f"Suggested SOPs from today's discussion:\n"
+                f"{sop_suggestions}"
+            )
 
             slack_client.chat_postMessage(
                 channel=channel_id,
-                text=f"📋 End-of-Day Summary for Today (#{channel_name}):\n\n{summary}"
+                text=text[:3900],  # stay under Slack hard limits
             )
 
         return {"ok": True}
@@ -1359,6 +1400,7 @@ async def cron_daily_summary(request: Request):
     except Exception:
         logger.exception("cron_daily_summary failed")
         return {"ok": False, "error": "daily summary failed"}
+
 
 
 # -------------------------------
