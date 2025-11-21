@@ -743,6 +743,107 @@ def handle_app_mention(event, say, client, logger):
     user = event.get("user")
     channel_id = event.get("channel")
     thread_ts = event.get("thread_ts") or event["ts"]
+        # --- Mode: draft an SOP from this conversation/thread ---
+    if (
+        "draft sop" in lower_text
+        or "store this as an sop" in lower_text
+        or "create sop" in lower_text
+    ):
+        try:
+            # Get the whole thread this mention is in
+            replies = client.conversations_replies(
+                channel=channel_id,
+                ts=thread_ts,
+                limit=100,
+            )
+            messages = replies.get("messages", [])
+
+            convo_text = build_conversation_text(messages)
+
+            prompt = (
+                "You are an assistant for the Jayz Stays team.\n"
+                "Based on the Slack conversation below, draft a clear, step-by-step "
+                "Standard Operating Procedure (SOP).\n"
+                "Requirements:\n"
+                "- Use plain text only (no *, #, markdown).\n"
+                "- Use clear headings and numbered or bullet-style steps.\n"
+                "- Be specific and actionable.\n\n"
+                f"CONVERSATION:\n{convo_text}\n"
+            )
+
+            sop_draft = summarize_text_for_mode("qa", prompt)
+
+            say(
+                "Here is a proposed SOP based on this conversation:\n\n"
+                "SOP DRAFT START\n"
+                f"{sop_draft}\n"
+                "SOP DRAFT END\n\n"
+                "If this looks good, reply in this thread with:\n"
+                "save sop: Your SOP Title",
+                thread_ts=thread_ts,
+            )
+        except Exception as e:
+            logger.error(f"Error drafting SOP from thread: {e}")
+            say(
+                "Sorry, I could not draft an SOP from this conversation due to an error.",
+                thread_ts=thread_ts,
+            )
+        return
+    # --- Mode: save the last SOP draft in this thread to Google Drive ---
+    if lower_text.startswith("save sop:"):
+        try:
+            # Extract title from "save sop: <title>"
+            title = text.split("save sop:", 1)[1].strip()
+            if not title:
+                title = "Untitled SOP"
+
+            # Fetch the full thread to find the most recent SOP draft
+            replies = client.conversations_replies(
+                channel=channel_id,
+                ts=thread_ts,
+                limit=100,
+            )
+            messages = replies.get("messages", [])
+
+            sop_text = None
+
+            # Look from newest to oldest for a bot message containing SOP DRAFT START/END
+            for m in reversed(messages):
+                if m.get("subtype") != "bot_message":
+                    continue
+                body_text = m.get("text", "")
+                if "SOP DRAFT START" in body_text and "SOP DRAFT END" in body_text:
+                    start_idx = body_text.index("SOP DRAFT START") + len("SOP DRAFT START")
+                    end_idx = body_text.index("SOP DRAFT END", start_idx)
+                    sop_text = body_text[start_idx:end_idx].strip()
+                    break
+
+            if not sop_text:
+                say(
+                    "I could not find a SOP draft in this thread. "
+                    "Try asking me to 'draft sop' again first.",
+                    thread_ts=thread_ts,
+                )
+                return
+
+            # Save to Google Drive as a Google Doc
+            file = create_sop_file_in_drive(title, sop_text)
+            name = file.get("name", title)
+            link = file.get("webViewLink", "(no link)")
+
+            say(
+                f"SOP '{name}' has been saved to Google Drive.\n"
+                f"Link: {link}",
+                thread_ts=thread_ts,
+            )
+        except Exception as e:
+            logger.error(f"Error saving SOP to Drive: {e}")
+            say(
+                "Sorry, I could not save the SOP to Google Drive. Please check the logs.",
+                thread_ts=thread_ts,
+            )
+        return
+
 
     lower_text = text.lower()
 
