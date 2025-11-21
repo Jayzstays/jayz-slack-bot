@@ -496,38 +496,7 @@ def _extract_revenue_from_reservation(reservation) -> float:
 
     return 0.0
 
-def _extract_revenue_from_reservation(reservation) -> float:
-    """
-    Try several common fields in a Guesty reservation to estimate total revenue.
-    Returns 0.0 if we can't find anything.
-    """
-    def _to_float(val):
-        try:
-            return float(val)
-        except Exception:
-            return 0.0
 
-    money = (
-        reservation.get("money")
-        or reservation.get("price")
-        or reservation.get("balance")
-        or {}
-    )
-
-    # Direct keys on money dict
-    for key in ("total", "grossTotal", "balanceDue", "nativeTotal"):
-        if isinstance(money, dict) and key in money:
-            return _to_float(money.get(key))
-
-    # Nested native dict
-    if isinstance(money, dict):
-        native = money.get("native")
-        if isinstance(native, dict):
-            for key in ("total", "grossTotal"):
-                if key in native:
-                    return _to_float(native.get(key))
-
-    return 0.0
 def guesty_get_yesterday_bookings_stats():
     """
     Fetch reservations that were created yesterday and compute:
@@ -769,20 +738,6 @@ def get_slack_channel_for_reservation(reservation):
 
     return mapping.get(str(listing_id))
 
-def _extract_reservations_list(raw):
-    """
-    Guesty Open API may return either:
-      - {"results": [...], ...}
-      - or a plain list [...]
-    This normalizes it into a list.
-    """
-    if not raw:
-        return []
-    if isinstance(raw, list):
-        return raw
-    if isinstance(raw, dict):
-        return raw.get("results", [])
-    return []
 
 
 def build_property_daily_ops_text(property_name, checkins, checkouts):
@@ -1406,33 +1361,6 @@ def debug_guesty_full_listing():
     except Exception as e:
         return {"error": str(e)}
 
-@app.get("/debug/guesty-full-reservation")
-async def debug_guesty_full_reservation():
-    """
-    Fetch ONE full reservation from Guesty with no 'fields' filter.
-    This shows the complete JSON structure so we can locate
-    check-in form / preCheckIn data if available.
-    """
-    try:
-        access_token = guesty_get_access_token()
-    except Exception as e:
-        return {"error": f"Token error: {e}"}
-
-    url = "https://open-api.guesty.com/v1/reservations"
-    headers = {"Authorization": f"Bearer {access_token}"}
-
-    params = {
-        "sort": "-createdAt",   # newest reservation
-        "limit": 1
-    }
-
-    try:
-        resp = requests.get(url, headers=headers, params=params, timeout=30)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        return {"error": str(e)}
-
 
 # -----------------------------------------------
 # NEW DEBUG: suggest property -> channel mapping
@@ -1583,38 +1511,6 @@ def debug_guesty_full_reservation():
         return data
     except Exception as e:
         return {"error": str(e)}
-
-
-# -------------------------------
-# UTIL: Fetch today's messages in a channel
-# -------------------------------
-def get_today_messages(slack_client, channel_id):
-    """Fetch today’s Slack messages from a channel."""
-    today = datetime.now(TZ).date().isoformat()
-
-    resp = slack_client.conversations_history(
-        channel=channel_id,
-        limit=1000,
-    )
-
-    messages = []
-    for m in resp.get("messages", []):
-        ts = float(m.get("ts", 0))
-        d = datetime.fromtimestamp(ts, TZ).date().isoformat()
-        if d == today:
-            messages.append(m)
-
-    return messages
-
-
-def build_conversation_text(messages):
-    """Convert messages list into plain text."""
-    lines = []
-    for m in messages:
-        user = m.get("user", "unknown")
-        text = m.get("text", "")
-        lines.append(f"{user}: {text}")
-    return "\n".join(lines)
 
 
 # -------------------------------
