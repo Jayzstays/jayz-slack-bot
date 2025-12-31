@@ -1527,6 +1527,11 @@ def debug_guesty_full_reservation():
 @app.api_route("/cron/daily-summary", methods=["POST", "GET"])
 async def cron_daily_summary(request: Request):
     logger.info("cron_daily_summary triggered via %s", request.method)
+    
+    if not bot_posting_enabled():
+    logger.info("BOT_POSTING_ENABLED=false — skipping daily summary cron")
+    return {"ok": True, "skipped": True}
+
     try:
         # List channels
         channels = []
@@ -1641,9 +1646,14 @@ async def cron_ops_today(request: Request):
         )
 
         # 6) Post to Slack main ops channel
-        slack_client.chat_postMessage(
-            channel=channel_id,
-            text=final_text,
+       if bot_posting_enabled():
+    slack_client.chat_postMessage(
+        channel=channel_id,
+        text=final_text,
+    )
+else:
+    logger.info("BOT_POSTING_ENABLED=false — skipping ops today post")
+
         )
 
         # (Optional) if you already had per-property posts, keep that block here
