@@ -29,6 +29,14 @@ GUESTY_CLIENT_ID = os.environ.get("GUESTY_CLIENT_ID")
 GUESTY_CLIENT_SECRET = os.environ.get("GUESTY_CLIENT_SECRET")
 
 
+def bot_posting_enabled() -> bool:
+    """
+    Global kill-switch for Slack posting.
+    When BOT_POSTING_ENABLED=false, the bot will NOT post messages to Slack.
+    """
+    return os.environ.get("BOT_POSTING_ENABLED", "true").lower() == "true"
+
+
 # Timezone for "today"
 TZ = ZoneInfo("America/Los_Angeles")
 
