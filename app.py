@@ -1527,10 +1527,11 @@ def debug_guesty_full_reservation():
 @app.api_route("/cron/daily-summary", methods=["POST", "GET"])
 async def cron_daily_summary(request: Request):
     logger.info("cron_daily_summary triggered via %s", request.method)
-    
+
+    # Kill-switch: skip the entire job (no OpenAI calls, no Slack posts)
     if not bot_posting_enabled():
-    logger.info("BOT_POSTING_ENABLED=false — skipping daily summary cron")
-    return {"ok": True, "skipped": True}
+        logger.info("BOT_POSTING_ENABLED=false — skipping daily summary cron")
+        return {"ok": True, "skipped": True}
 
     try:
         # List channels
@@ -1564,7 +1565,7 @@ async def cron_daily_summary(request: Request):
             # Regular end-of-day summary
             summary = summarize_text_for_mode("channel_today", convo_text)
 
-            # NEW: suggested SOPs
+            # Suggested SOPs
             try:
                 sop_suggestions = summarize_text_for_mode("sop_suggestions", convo_text)
             except Exception as e:
@@ -1580,7 +1581,7 @@ async def cron_daily_summary(request: Request):
 
             slack_client.chat_postMessage(
                 channel=channel_id,
-                text=text[:3900],  # stay under Slack hard limits
+                text=text[:3900],
             )
 
         return {"ok": True}
@@ -1588,7 +1589,6 @@ async def cron_daily_summary(request: Request):
     except Exception:
         logger.exception("cron_daily_summary failed")
         return {"ok": False, "error": "daily summary failed"}
-
 
 
 # -------------------------------
@@ -1601,6 +1601,11 @@ async def cron_ops_today(request: Request):
 
     if not channel_id:
         return {"ok": False, "error": "OPS_TODAY_CHANNEL_ID not set"}
+
+    # Kill-switch: skip the entire job (no OpenAI calls, no Slack posts)
+    if not bot_posting_enabled():
+        logger.info("BOT_POSTING_ENABLED=false — skipping ops today cron")
+        return {"ok": True, "skipped": True}
 
     try:
         # 1) Today's Guesty data (check-ins / check-outs)
@@ -1646,17 +1651,10 @@ async def cron_ops_today(request: Request):
         )
 
         # 6) Post to Slack main ops channel
-       if bot_posting_enabled():
-    slack_client.chat_postMessage(
-        channel=channel_id,
-        text=final_text,
-    )
-else:
-    logger.info("BOT_POSTING_ENABLED=false — skipping ops today post")
-
+        slack_client.chat_postMessage(
+            channel=channel_id,
+            text=final_text,
         )
-
-        # (Optional) if you already had per-property posts, keep that block here
 
         return {"ok": True}
 
